@@ -1,0 +1,170 @@
+TASK:
+Parallelize an existing sequential program, written in Java, 
+What the existing sequential program does:
+It finds the shortest paths to all vertices from a distinguished source vertex in a graph. 
+This is the single-source shortest path (SSSP) problem. 
+
+The fastest known sequential SSSP algorithm is due to Dijkstra.  It runs in time O((m + n) log n) time, where n is the number of vertices and m is the number of edges (0 ≤ m ≤ (n
+
+As you may recall from a data structures or algorithms class, Dijkstra’s algorithm maintains a priority queue of vertices, ordered by the length of their currently-best-known paths to the source. 
+Initially, the source itself has path length 0 and every other vertex has path length ∞.  
+At each step, we remove the vertex v at the head of the queue, whose path is now known to be as short as possible.  
+For each neighbor w of v, we then look to see if reaching the source through v would be better than using w’s currently-best-known path; 
+if so, we update w’s information and reposition it in the priority queue. 
+Unfortunately, Dijkstra’s algorithm doesn’t parallelize very well:  
+it’s what is known as a label-setting algorithm—
+we only select an edge when we’re sure it constitutes part of the shortest-path tree, and we never change our mind.  
+The priority queue, which allows us to make correct decisions, serves as a central bottleneck.  
+
+
+It turns out that there are label-correcting algorithms with comparable sequential performance that are more amenable to parallelization.  
+These algorithms admit the possibility of de-selecting an edge when a better route is found; 
+this ability to change means that threads can work in parallel on the basis on incomplete local knowledge, confident that any mistakes they make will be corrected later. 
+
+The best known label-correcting SSSP algorithm is known as Δ-stepping, due to Meyer and Sanders [J. Algorithms, 2003].  
+Instead of a strict priority queue, it maintains an array of buckets, 
+where bucket i holds vertices whose currently best-known paths have lengths i × Δ ≤ l < (i+1) × Δ.  
+
+Initially only the source is present in the array, in bucket 0.  
+At each step of the algorithm, we consider the first non-empty bucket B.  
+For each vertex v in B, we relax each neighbor w that is connected to v by an edge of weight ≤Δ—that is, 
+we check to see if connecting through v will improve w’s path to the source, and if so, we move w to the appropriate new bucket, which might be B or one of its successors.  
+
+Because we might move w into B, we iterate until B is empty; 
+then we relax all the neighbors connected to v by edges of weight >Δ, for all edges v that we have removed from B.  
+
+Finally, we move on to the next nonempty bucket.  
+
+As it turns out, given a maximum weight W for edges, we can be sure that all vertices currently in the array will live within W/Δ buckets of each other.  
+If we create a few more buckets than this, we can safely use the array in a circular fashion; 
+we don’t actually need max-path-length/Δ of them. 
+
+Over time, w’s preferred edge back to the source may be updated several times.  
+Crucially, however, iteration over the neighbors w of v can be done in parallel for all vertices v in B.  
+This is the source of potential parallelism.  
+Harvesting this parallelism isn’t trivial, however. 
+
+
+Threads must always work on the same bucket at the same point in time, 
+How? 
+We can use a barrier to ensure that all threads have finished working on the current bucket before moving on to the next one.
+Threads also must synchronize their access to all shared data structures.  
+
+While there are many ways to parallelize Δ-stepping, the following is perhaps the easiest:  
+We statically partition the n vertices so that each of our t threads is responsible for approximately n/t of them. 
+Each thread then maintains its own, separate array of buckets.  
+
+We use a barrier (e.g., Java’s CyclicBarrier) to make sure that each thread works on its ith bucket during step i (perhaps each part of step i).  
+We also create a set of message queues (e.g., instances of Java’s ConcurrentLinkedQueue) that allow threads to pass work to one another.  
+When thread j discovers an opportunity to relax vertex w, which belongs to thread k, it does not do so directly; 
+rather, it enqueues a message asking k to do so.  
+(For efficiency, j may “batch” together requests being sent to the same destination.)
+
+    
+As a starting point, we are giving you sequential code for both Dijkstra’s algorithm and a straightforward version of Δ-stepping. 
+The program is designed to be run from the command line, where you can specify various start-up parameters (see below).  
+
+In interactive modes, it opens a square display containing n−1 blue dots (vertices), a green dot (the source), and various edges among these.  
+At the bottom of the display is a series of control buttons. 
+Source code is in the files SSSP.java and Coordinator.java, which you can view in, and save from, your browser.  
+Executable code lies in approximately 30 .class files, many of which are for the user interface.  
+
+These are generated by running SSSP.java through the Java compiler, javac. 
+Machine resources
+You will be running this assignment on node2x14a.csug.rochester.edu and node2x18a.csug.rochester.edu.  
+These machines have two processor chips each, with 14 or 18 cores per chip, as suggested by the names.  
+Each core has 2 hardware contexts (hyperthreads). 
+This means the machines can execute up to 56 or 72 threads in parallel.  
+For large graphs, you should be able to obtain significant speedup, 
+though you will probably find that there is a point of diminishing returns at which the 
+ overhead of creating and managing additional threads (all of which compete for bus and cache bandwidth) outweighs any additional performance improvements. 
+
+Note that the node machines are visible only inside the csug firewall.  
+Only cycle1, cycle2, and cycle3 are visible from outside.  
+Thus to run timing experiments from outside the firewall you must first ssh to one of the cycle machines and then ssh from there to node2x14a or node2x18a.  
+
+If you’re already in the majors lab or the Hylan lab, you can ssh directly from your desktop. 
+As the due date approaches, 
+we will reserve much of the time on one of the node machines for timing experiments, with a sign-up system that allows you to obtain exclusive access to the machine (watch Blackboard for announcements). 
+
+Note that you will almost certainly not be able to get last-minute exclusive access, and since results of timing experiments are required for full credit on the assignment, 
+you will need to plan to have your code debugged and ready for benchmarking several days ahead of the due date. 
+
+Execution modes
+The code we are giving you accepts seven command-line arguments:
+
+−a  [0123]
+Animation mode. 
+0   (default) =>
+print run time to standard output, but nothing else
+1 =>
+print list of selected and de-selected edges, plus run time
+2 =>
+create a GUI that shows the discovered shortest-paths tree, and allow the user to re-run with additional sets of vertices
+3 =>
+animate the algorithm on the screen as it runs. 
+−n  num
+Number of vertices.  Default = 50.  More than a couple hundred becomes too dense to look good when animated.  You’ll need to run big numbers (more than 10,000) to get multi-second execution times. 
+−d  num
+Desired average vertex degree (for vertices near the middle of large graphs).  Default = 5. 
+−g  num
+Desired degree of geometric realism: 0 ≤ num ≤ 1.  If num = 1 (default), edge weights are the Euclidean distance between their endpoints, and the graph creation routine is biased toward inclusion of shorter edges.  If num = 0, edge weights are entirely random, and may connect to anywhere.  Values in between will give you a variety of graphs with which to experiment. 
+−s  num
+Seed for pseudorandom number generator.  Every value of the seed produces a different set of vertices. 
+−t  num
+Number of threads (max) that should be running at any given time.  If 0, the code runs Dijkstra’s algorithm on one thread.  If >= 1, it runs Δ-stepping.  (The provided code always does so on one thread; you should make it do so on num threads.) 
+− v
+Prints a summary of these argument conventions and exits. 
+You can run the application remotely in animation modes 2 and 3, with X11 forwarding over ssh, but it will be choppy.  You will probably get better results with -Y (insecure) forwarding rather than -X.  You will want to use mode 0 for timing tests—otherwise the program will spend all its time generating output, and you won’t really be measuring anything of interest.  Note that for larger graphs the reported times will be much shorter than wall-clock time.  That’s because the program is spending much of its time creating the graph rather than actually finding shortest paths. 
+
+You are welcome to do development on a personal machine (Java code is very portable), but you will need to test your code and collect performance results at csug.  You’ll almost certainly want to use a 64-bit Java installation; otherwise you’ll risk running out of heap space on large problems.  And you’ll need to go large:  my core i7 laptop can solve a million-vertex graph (with Δ-stepping) in half a second.  
+For 10 million vertices it takes just under 10 seconds. 
+Note that building the graph becomes a time-consuming process when the number of vertices is large; 
+don’t get worried if the program takes a while to start. 
+
+Analyzing speedup
+The write-up requirements are more extensive for this assignment.  
+In addition to parallelizing the code and describing what you did, you must evaluate the success of your parallelization.  
+Using one of the node machines, for some convenient number of vertices, create a graph that plots execution time as a function of the number of threads, varying that number from 1 to 48.  
+(Don’t try to plot every possible thread count—that would take a lot of experimentation time!  Thread counts of, say, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, and 48 should suffice.)  
+On this same graph, for comparison, indicate the run time of Dijkstra’s algorithm.  
+
+On a second graph, plot the speedup of your code:  the run time of the sequential version divided by the run time of your parallel version.  
+Ideally, you’d see a speedup of k with k threads.  
+How close do you come?  
+What bottleneck(s) keep you from doing better? 
+
+Full disclosure: 
+getting parallel speedup in computationally demanding applications is hard.  
+The task is complicated in this assignment by the fact that you will need to use very large graphs—larger than the last-level cache—to get multi-second execution times; 
+at that point, your run time may be dominated by memory access costs, not by computation.  
+(As of Nov. 3, on a million-node graph, my parallel solution has modest speedup on 2, 4, or 8 threads. 
+At 16 it’s slower again, and it never beats Dijkstra’s algorithm—which it would have to in order to be useful.)  
+You will receive full credit if you get the parallel version of Δ-stepping working correctly and it doesn’t slow down dramatically with increasing numbers of threads.  
+Significant parallel speedup is worth significant extra credit. 
+
+Division of labor and time management
+As in previous assignments, you may work alone or in teams of two.  
+Beware that debugging parallel programs tends to be much harder than debugging sequential programs, so be sure to leave enough time.  
+Be sure to follow all the rules on the Grading page.  
+As with all assignments, use the turn-in script:  ~cs254/bin/TURN_IN.  
+Put your write-up in a README.pdf file in the directory in which you run the script.  Be sure to describe any features of your code that the TAs might not immediately notice. 
+
+On-line resources
+Java 14 documentation (Java 19 is the latest version, but 14 appears to be what’s installed at csug)
+The Java Tutorials
+Concurrency “trail”
+Language Specification
+The Meyer and Sanders paper on Δ-stepping (if you’re curious—not required). 
+Extra credit suggestions
+Modify the program so that it can read start-up configurations from a file.  Use this to experiment with non-random distributions of vertices. 
+The code we have given you uses a heuristic to set Δ.  Add a command-line argument to control the Δ choice, and experiment with its impact. 
+The parallelization strategy suggested above (partition vertices among threads, and send relaxation messages to owner threads) works well, with only modest amounts of synchronization, but it isn’t the only possible strategy.  Explore other possible parallelizations.  You might, for example, share a single bucket array among threads. 
+For execution on some fixed number of threads (even one!), plot run time as a function of the number of vertices.  Do you see any surprises?  
+Can you guess where the working set spills out of the various levels of cache? 
+
+Translate the code into C# or C++ and experiment with those languages’ concurrency features. 
+Trivia assignment
+Before end of day on Friday, November 4, each student should complete the T4 trivia assignment found on Blackboard. 
+MAIN DUE DATE:
+Wednesday November 23, at noon; no extensions. 
