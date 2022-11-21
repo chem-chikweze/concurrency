@@ -726,21 +726,23 @@ class Surface {
             for (;;) {
                 LinkedList<Vertex> removed = new LinkedList<Vertex>();
                 LinkedList<Request> requests;
-                while (buckets.get(i).size() > 0) {
-                    requests = findRequests(buckets.get(i), true);
-                    removed.addAll(buckets.get(i));
-                    buckets.set(i, new LinkedHashSet<Vertex>());
+                while (true) {
+                    while (buckets.get(i).size() > 0) {
+                        requests = findRequests(buckets.get(i), true);
+                        removed.addAll(buckets.get(i));
+                        buckets.set(i, new LinkedHashSet<Vertex>());
 
-                    for (Request req : requests) {
-                        if (vertexToThreadMap.get(req.v) == Thread.currentThread().getId()) {
-                            try {
-                                req.relax(buckets);
-                            } catch (Coordinator.KilledException e) {
-                                e.printStackTrace();
+                        for (Request req : requests) {
+                            if (vertexToThreadMap.get(req.v) == Thread.currentThread().getId()) {
+                                try {
+                                    req.relax(buckets);
+                                } catch (Coordinator.KilledException e) {
+                                    e.printStackTrace();
+                                }
+                            } else {
+                                long threadId = vertexToThreadMap.get(req.v);
+                                threadToRequestsMap.get(threadId).add(req);
                             }
-                        } else {
-                            long threadId = vertexToThreadMap.get(req.v);
-                            threadToRequestsMap.get(threadId).add(req);
                         }
                     }
 
@@ -824,63 +826,58 @@ class Surface {
                     if (nobodyHasAnythingLeft) {
                         break;
                     }
-                }
 
-                // remembered heavy relaxations
-                requests = findRequests(removed, false);
-                for (Request req : requests) {
-                    // perform all the remembered heavy relaxations that belong to me
-                    if (vertexToThreadMap.get(req.v) == Thread.currentThread().getId()) {
+                    // remembered heavy relaxations
+                    requests = findRequests(removed, false);
+                    for (Request req : requests) {
+                        // perform all the remembered heavy relaxations that belong to me
+                        if (vertexToThreadMap.get(req.v) == Thread.currentThread().getId()) {
+                            try {
+                                req.relax(buckets);
+                            } catch (Coordinator.KilledException e) {
+                                e.printStackTrace();
+                            }
+                        } else {
+                            // identify which remembered heavy relaxations belong to other threads;
+                            // enqueue them in the appropriate queues
+                            long threadId = vertexToThreadMap.get(req.v);
+                            threadToRequestsMap.get(threadId).add(req);
+                        }
+                    }
+
+                    try {
+                        barrier.await();
+                    } catch (InterruptedException | BrokenBarrierException e1) {
+                        e1.printStackTrace();
+                    }
+
+                    // while my incoming Request queue is nonempty take a request out of the queue
+                    // and do the specified relaxation(s)
+                    for (Request req : threadToRequestsMap.get(Thread.currentThread().getId())) {
                         try {
                             req.relax(buckets);
                         } catch (Coordinator.KilledException e) {
                             e.printStackTrace();
                         }
-                    } else {
-                        // identify which remembered heavy relaxations belong to other threads;
-                        // enqueue them in the appropriate queues
-                        long threadId = vertexToThreadMap.get(req.v);
-                        threadToRequestsMap.get(threadId).add(req);
                     }
-                }
 
-                try {
-                    barrier.await();
-                } catch (InterruptedException | BrokenBarrierException e1) {
-                    e1.printStackTrace();
+                    // clear threadToRequestsMap for current thread
+                    threadToRequestsMap.get(Thread.currentThread().getId()).clear();
                 }
-
-                // while my incoming Request queue is nonempty take a request out of the queue
-                // and do the specified relaxation(s)
-                for (Request req : threadToRequestsMap.get(Thread.currentThread().getId())) {
-                    try {
-                        req.relax(buckets);
-                    } catch (Coordinator.KilledException e) {
-                        e.printStackTrace();
-                    }
-                }
-
-                // clear threadToRequestsMap for current thread
-                threadToRequestsMap.get(Thread.currentThread().getId()).clear();
 
                 // repeat
                 // move to next bucket
                 i = (i + 1) % numBuckets;
 
-                try {
-                    barrier.await();
-                } catch (InterruptedException | BrokenBarrierException e) {
-                    e.printStackTrace();
-                }
-
                 // check if all buckets in thread is empty
                 boolean allBucketsEmpty = true;
-                for (LinkedHashSet<Vertex> bucket : buckets) {
-                    if (bucket.size() > 0) {
+                for (int j = 0; j < buckets.size(); j++) {
+                    if (buckets.get(j).size() > 0) {
                         allBucketsEmpty = false;
                         break;
                     }
                 }
+
                 // if all buckets are empty set threadToIfAllBucketsEmpty to true
                 if (allBucketsEmpty) {
                     threadToIfAllBucketsEmpty[threadToIndexMap.get(Thread.currentThread().getId())] = true;
@@ -897,18 +894,10 @@ class Surface {
                 // if all buckets are empty then exit outer loop
                 boolean allBucketsEmptyForAllThreads = true;
                 for (int j = 0; j < threadToIfAllBucketsEmpty.length; j++) {
-                    if (threadToIfAllBucketsEmpty[j] != null && !threadToIfAllBucketsEmpty[j]) {
+                    if (!threadToIfAllBucketsEmpty[j]) {
                         allBucketsEmptyForAllThreads = false;
                         break;
                     }
-                }
-
-                // sauce
-
-                try {
-                    barrier.await();
-                } catch (InterruptedException | BrokenBarrierException e1) {
-                    e1.printStackTrace();
                 }
 
                 // if nobody has anything in their bucket and we've gone all the way around the
@@ -972,6 +961,8 @@ class Surface {
         for (int i = 0; i < numThreads; ++i) {
             threadToRequestsMap.put(threads.get(i).getId(), new ConcurrentLinkedQueue<Request>());
             threadToIndexMap.putIfAbsent(threads.get(i).getId(), i);
+            threadToIfAllBucketsEmpty[i] = true;
+            threadToIfBucketIsEmpty[i] = true;
         }
 
         // start all the threads
